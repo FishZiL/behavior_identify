@@ -196,6 +196,7 @@ export default {
     const recentAlerts = ref([])
     const videoPreview = ref(null)
     const videoStreamUrl = ref('')
+    const isStopping = ref(false)  // 添加停止状态标志
     
     let updateTimer = null
     let websocket = null
@@ -458,15 +459,22 @@ export default {
     const stopMonitoring = async () => {
       console.log('🛑 Dashboard：开始停止预览流程')
       try {
-        // 🔧 参考RealtimeMonitor的方式：先断开视频流连接
-        // 1. 立即断开视频流连接，模拟页面关闭的效果
-        console.log('🛑 Dashboard：断开视频流连接')
-        videoStreamUrl.value = ''  // 清空视频流URL，断开img标签的连接
+        // 设置停止状态标志，用于忽略主动断开连接的错误
+        isStopping.value = true
 
-        // 2. 等待一小段时间，确保连接断开
+        // 🔧 优化用户体验：立即更新前端状态，避免卡顿感
+        console.log('🛑 Dashboard：立即更新前端状态')
+        isMonitoring.value = false
+        videoStreamUrl.value = ''  // 清空视频流URL，断开img标签的连接
+        currentFPS.value = 0
+        currentTaskId = null
+        ElMessage.success('预览已停止')
+
+        // 🔧 异步调用后端API，不阻塞前端响应
+        // 等待一小段时间，确保连接断开
         await new Promise(resolve => setTimeout(resolve, 100))
 
-        // 3. 调用后端停止监控API（即使预览模式也调用，确保资源释放）
+        // 调用后端停止监控API（即使预览模式也调用，确保资源释放）
         console.log('🛑 Dashboard：调用停止监控API')
         const response = await fetch('/api/stop_monitoring', {
           method: 'POST',
@@ -479,12 +487,6 @@ export default {
           const result = await response.json()
           console.log('🛑 Dashboard：收到API响应', result)
         }
-
-        // 更新前端状态
-        isMonitoring.value = false
-        currentFPS.value = 0
-        currentTaskId = null
-        ElMessage.success('预览已停止')
 
         // 清理WebSocket连接（如果有的话）
         if (websocket) {
@@ -507,12 +509,22 @@ export default {
           websocket.close()
           websocket = null
         }
+      } finally {
+        // 重置停止状态标志
+        isStopping.value = false
       }
     }
 
     // 处理视频流错误
     const handleStreamError = (event) => {
       console.error('预览视频流加载错误:', event)
+
+      // 如果正在停止监控，忽略错误消息（这是主动断开连接导致的）
+      if (isStopping.value) {
+        console.log('🛑 Dashboard：忽略停止预览时的连接错误')
+        return
+      }
+
       ElMessage.error('预览视频流连接失败，请检查网络连接')
     }
 
@@ -616,6 +628,7 @@ export default {
       recentAlerts,
       videoPreview,
       videoStreamUrl,
+      isStopping,
       startMonitoring,
       stopMonitoring,
       handleStreamError,

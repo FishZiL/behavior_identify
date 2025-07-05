@@ -8,6 +8,10 @@ module.exports = defineConfig({
     port: 8080,
     host: 'localhost',
     open: false,
+    // 🔧 修复：禁用错误覆盖层，避免ResizeObserver错误显示
+    client: {
+      overlay: false
+    },
     proxy: {
       '/api': {
         target: 'http://localhost:5001',

@@ -17,30 +17,35 @@ class RealtimeStatistics:
     def __init__(self, alert_behaviors: List[str] = None):
         """
         初始化实时统计
-        
+
         Args:
             alert_behaviors: 报警行为列表
         """
         self.alert_behaviors = alert_behaviors or ['fall down', 'fight', 'enter', 'exit']
-        
+
         # 统计数据
         self.start_time = time.time()
         self.total_detections = 0
         self.total_alerts = 0
         self.frame_count = 0
-        
+
         # 行为统计
         self.behavior_counts = defaultdict(int)
         self.alert_behavior_counts = defaultdict(int)
-        
+
         # 最近检测结果（保留最近100个）
         self.recent_detections = deque(maxlen=100)
         self.recent_alerts = deque(maxlen=50)
-        
+
+        # 🔧 新增：时间窗口去重统计
+        self.time_window_seconds = 5.0  # 时间窗口：5秒内同一行为只统计一次
+        self.behavior_last_time = {}  # 记录每个行为的最后统计时间
+        self.alert_last_time = {}     # 记录每个报警行为的最后统计时间
+
         # 性能统计
         self.fps_history = deque(maxlen=30)  # 保留最近30秒的FPS
         self.processing_times = deque(maxlen=30)  # 保留最近30次的处理时间
-        
+
         # 线程锁
         self._lock = threading.Lock()
         
@@ -75,41 +80,70 @@ class RealtimeStatistics:
     
     def add_detections(self, detections: List[Dict[str, Any]]):
         """
-        添加检测结果
-        
+        添加检测结果（使用时间窗口去重统计）
+
         Args:
             detections: 检测结果列表
         """
         if not detections:
             return
-            
+
         with self._lock:
             current_time = time.time()
-            
+
             for detection in detections:
+                # 总检测数按帧统计（用于性能监控）
                 self.total_detections += 1
-                
-                # 统计行为类型
+
+                # 🔧 行为统计使用时间窗口去重
                 behavior_type = detection.get('behavior_type')
                 if behavior_type:
-                    self.behavior_counts[behavior_type] += 1
-                
-                # 检查是否为报警行为
+                    # 检查是否在时间窗口内
+                    last_time = self.behavior_last_time.get(behavior_type, 0)
+                    if current_time - last_time >= self.time_window_seconds:
+                        # 超过时间窗口，统计这次行为
+                        self.behavior_counts[behavior_type] += 1
+                        self.behavior_last_time[behavior_type] = current_time
+                        print(f"🔧 行为统计：{behavior_type} (距离上次 {current_time - last_time:.1f}s)")
+
+                # 🔧 报警行为统计也使用时间窗口去重
                 is_anomaly = detection.get('is_anomaly', False)
-                if is_anomaly:
-                    self.total_alerts += 1
-                    if behavior_type:
+                if is_anomaly and behavior_type:
+                    # 检查报警行为的时间窗口
+                    alert_key = f"alert_{behavior_type}"
+                    last_alert_time = self.alert_last_time.get(alert_key, 0)
+                    if current_time - last_alert_time >= self.time_window_seconds:
+                        # 超过时间窗口，统计这次报警
+                        self.total_alerts += 1
                         self.alert_behavior_counts[behavior_type] += 1
-                    
-                    # 添加到最近报警列表
-                    alert_info = {
-                        'timestamp': current_time,
-                        'behavior_type': behavior_type,
-                        'confidence': detection.get('confidence', 0),
-                        'bbox': detection.get('bbox', []),
-                        'object_id': detection.get('object_id')
-                    }
-                    self.recent_alerts.append(alert_info)
+                        self.alert_last_time[alert_key] = current_time
+
+                        # 添加到最近报警列表
+                        # 🔧 修复：提取位置信息
+                        bbox = detection.get('bbox', [])
+                        x = detection.get('x', 0)
+                        y = detection.get('y', 0)
+
+                        # 如果没有直接的x,y坐标，从bbox中计算
+                        if (x == 0 and y == 0) and bbox and len(bbox) >= 4:
+                            if isinstance(bbox, list):
+                                x = (bbox[0] + bbox[2]) / 2  # 中心点x
+                                y = (bbox[1] + bbox[3]) / 2  # 中心点y
+                            elif isinstance(bbox, dict):
+                                x = (bbox.get('x1', 0) + bbox.get('x2', 0)) / 2
+                                y = (bbox.get('y1', 0) + bbox.get('y2', 0)) / 2
+
+                        alert_info = {
+                            'timestamp': current_time,
+                            'behavior_type': behavior_type,
+                            'confidence': detection.get('confidence', 0),
+                            'bbox': bbox,
+                            'x': x,
+                            'y': y,
+                            'object_id': detection.get('object_id')
+                        }
+                        self.recent_alerts.append(alert_info)
+                        print(f"🚨 报警统计：{behavior_type} (距离上次 {current_time - last_alert_time:.1f}s)")
                 
                 # 添加到最近检测列表
                 detection_info = {
@@ -164,9 +198,21 @@ class RealtimeStatistics:
                     'behavior_name': self.behavior_names.get(alert['behavior_type'], alert['behavior_type']),
                     'confidence': alert['confidence'],
                     'time': alert_time.strftime('%H:%M:%S'),
-                    'object_id': alert['object_id']
+                    'object_id': alert['object_id'],
+                    'x': alert.get('x', 0),  # 🔧 新增：x坐标
+                    'y': alert.get('y', 0)   # 🔧 新增：y坐标
                 })
-            
+
+            # 🔧 新增：报警行为统计
+            alert_behavior_stats = []
+            for behavior, count in self.alert_behavior_counts.items():
+                if count > 0:  # 只显示有报警的行为
+                    alert_behavior_stats.append({
+                        'behavior_type': behavior,
+                        'behavior_name': self.behavior_names.get(behavior, behavior),
+                        'count': count
+                    })
+
             return {
                 'runtime_seconds': runtime_seconds,
                 'runtime_text': runtime_text,
@@ -176,8 +222,12 @@ class RealtimeStatistics:
                 'avg_fps': round(avg_fps, 1),
                 'avg_processing_time': round(avg_processing_time * 1000, 1),  # 转换为毫秒
                 'behavior_stats': behavior_stats,
+                'alert_behavior_stats': alert_behavior_stats,  # 🔧 新增：报警行为统计
                 'recent_alerts': recent_alerts_info,
-                'alert_behaviors': self.alert_behaviors
+                'alert_behaviors': self.alert_behaviors,
+                # 🔧 新增：时间窗口统计信息
+                'time_window_seconds': self.time_window_seconds,
+                'counting_method': f'{self.time_window_seconds}秒内去重统计'
             }
     
     def reset(self):
@@ -193,6 +243,24 @@ class RealtimeStatistics:
             self.recent_alerts.clear()
             self.fps_history.clear()
             self.processing_times.clear()
+            # 🔧 清理时间窗口记录
+            self.behavior_last_time.clear()
+            self.alert_last_time.clear()
+
+    def set_time_window(self, seconds: float):
+        """
+        设置时间窗口大小
+
+        Args:
+            seconds: 时间窗口大小（秒），同一行为在此时间内只统计一次
+        """
+        with self._lock:
+            self.time_window_seconds = max(1.0, seconds)  # 最小1秒
+            print(f"🔧 时间窗口设置为 {self.time_window_seconds} 秒")
+
+    def get_time_window(self) -> float:
+        """获取当前时间窗口大小"""
+        return self.time_window_seconds
     
     def get_recent_detection_summary(self, seconds: int = 10) -> Dict[str, Any]:
         """

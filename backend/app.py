@@ -254,11 +254,16 @@ def create_app(config_name='development'):
                         )
                     
                         if result['success']:
-                            # 保存检测结果到数据库 (在应用上下文中)
+                            # 🔧 修复：保存时间窗口去重后的检测结果到数据库
                             with app.app_context():
                                 task_obj = DetectionTask.query.get(current_task.id)
                                 if task_obj:
-                                    for detection in result['results']:
+                                    # 获取统计信息
+                                    statistics = result.get('statistics', {})
+                                    results_data = result.get('results', [])
+
+                                    # 保存时间窗口去重后的检测结果
+                                    for detection in results_data:
                                         detection_result = DetectionResult(
                                             task_id=task_obj.id,
                                             frame_number=detection['frame_number'],
@@ -274,7 +279,7 @@ def create_app(config_name='development'):
                                             is_anomaly=detection.get('is_anomaly', False)
                                         )
                                         db.session.add(detection_result)
-                                        
+
                                         # 如果是异常行为，创建报警记录
                                         if detection.get('is_anomaly'):
                                             alert = AlertRecord(
@@ -288,16 +293,21 @@ def create_app(config_name='development'):
                                                 description=f"检测到异常行为: {detection['behavior_type']}"
                                             )
                                             db.session.add(alert)
-                                    
-                                    # 更新任务状态
+
+                                    # 🔧 修复：更新任务状态，使用时间窗口统计信息
                                     task_obj.status = 'completed'
                                     task_obj.completed_at = get_beijing_datetime()
                                     task_obj.progress = 100.0
-                                    task_obj.detected_objects = len(result['results'])
-                                    task_obj.detected_behaviors = len([r for r in result['results'] if r.get('behavior_type')])
+                                    task_obj.total_frames = statistics.get('total_frames', 0)  # 🔧 修复总帧数
+                                    task_obj.detected_objects = statistics.get('effective_behaviors', len(results_data))  # 🔧 使用有效行为数
+                                    task_obj.detected_behaviors = len([r for r in results_data if r.get('behavior_type')])
                                     db.session.commit()
-                                    
-                                    print(f"✓ 任务 {task_obj.id} 检测完成，结果已保存")
+
+                                    print(f"✓ 任务 {task_obj.id} 检测完成，时间窗口统计结果已保存")
+                                    print(f"  总帧数: {statistics.get('total_frames', 0)}")
+                                    print(f"  有效行为数: {statistics.get('effective_behaviors', 0)}")
+                                    print(f"  报警次数: {statistics.get('alert_count', 0)}")
+                                    print(f"  保存的检测记录: {len(results_data)}")
                             
                         else:
                             # 更新失败状态 (在应用上下文中)
@@ -574,6 +584,55 @@ def create_app(config_name='development'):
             logger.error(f"停止监控失败: {str(e)}")
             return jsonify({'error': f'停止失败: {str(e)}'}), 500
 
+    @app.route('/api/statistics/time_window', methods=['GET', 'POST'])
+    def statistics_time_window():
+        """获取或设置统计时间窗口"""
+        try:
+            from services.realtime_statistics import get_realtime_statistics
+
+            if request.method == 'GET':
+                # 获取当前时间窗口设置
+                stats = get_realtime_statistics()
+                return jsonify({
+                    'success': True,
+                    'time_window_seconds': stats.get_time_window(),
+                    'description': f'{stats.get_time_window()}秒内同一行为只统计一次'
+                })
+
+            elif request.method == 'POST':
+                # 设置时间窗口
+                data = request.get_json()
+                if not data:
+                    return jsonify({'error': '缺少请求数据'}), 400
+
+                time_window = data.get('time_window_seconds')
+                if time_window is None:
+                    return jsonify({'error': '缺少time_window_seconds参数'}), 400
+
+                try:
+                    time_window = float(time_window)
+                    if time_window < 1.0 or time_window > 60.0:
+                        return jsonify({'error': '时间窗口必须在1-60秒之间'}), 400
+                except (ValueError, TypeError):
+                    return jsonify({'error': '时间窗口必须是数字'}), 400
+
+                # 设置时间窗口
+                stats = get_realtime_statistics()
+                stats.set_time_window(time_window)
+
+                return jsonify({
+                    'success': True,
+                    'time_window_seconds': time_window,
+                    'message': f'时间窗口已设置为{time_window}秒'
+                })
+
+        except Exception as e:
+            logger.error(f"时间窗口配置失败: {e}")
+            return jsonify({
+                'success': False,
+                'error': str(e)
+            }), 500
+
     # ========================= 数据查询API =========================
 
     @app.route('/api/tasks', methods=['GET'])
@@ -605,13 +664,18 @@ def create_app(config_name='development'):
                         file_size = os.path.getsize(task.source_path)
                 except Exception:
                     file_size = 0
-                
+
+                # 🔧 计算该任务的报警数量
+                alert_count = AlertRecord.query.filter_by(task_id=task.id).count()
+                logger.info(f"📊 任务 {task.id} ({task.task_name}) 的报警数量: {alert_count}")
+
                 task_data = {
                     'id': task.id,
                     'filename': task.task_name,  # 使用task_name作为filename
                     'size': file_size,  # 计算文件大小
                     'status': task.status,
                     'detections': task.detected_objects or 0,  # 使用detected_objects作为detections
+                    'alerts': alert_count,  # 🔧 添加报警数量
                     'uploadTime': task.created_at.isoformat() if task.created_at else None,  # 使用created_at作为uploadTime
                     'progress': task.progress,
                     'source_type': task.source_type
@@ -655,7 +719,12 @@ def create_app(config_name='development'):
 
             # 添加文件大小到返回数据
             task_dict['file_size'] = file_size
-            print(f"✅ 添加文件大小后: {list(task_dict.keys())}")  # 调试信息
+
+            # 🔧 添加报警数量
+            alert_count = AlertRecord.query.filter_by(task_id=task.id).count()
+            task_dict['alerts'] = alert_count
+
+            print(f"✅ 添加文件大小和报警数量后: {list(task_dict.keys())}")  # 调试信息
 
             return jsonify({
                 'success': True,
@@ -668,22 +737,26 @@ def create_app(config_name='development'):
     
     @app.route('/api/tasks/<int:task_id>/results')
     def get_task_results(task_id):
-        """获取任务完整结果（包含视频和统计信息）"""
+        """获取任务完整结果（包含视频和统计信息）- 🔧 修复：使用时间窗口统计"""
         try:
             # 获取任务信息
             task = DetectionTask.query.get(task_id)
             if not task:
                 return jsonify({'error': '任务不存在'}), 404
-            
-            # 获取检测结果
+
+            # 获取检测结果（现在是时间窗口去重后的结果）
             results = DetectionResult.query.filter_by(task_id=task_id).all()
-            
-            # 计算统计信息
-            total_detections = len(results)
-            detected_frames = len(set(result.frame_number for result in results))
+
+            # 🔧 修复：使用时间窗口统计信息
+            # 注意：现在数据库中的结果已经是时间窗口去重后的，所以直接统计即可
+            total_detections = len(results)  # 这是有效行为数，不是原始检测数
+            detected_frames = task.total_frames or 0  # 🔧 修复：检测帧数应该等于总帧数（每帧都被检测）
             alert_count = sum(1 for result in results if result.is_anomaly)
-            
-            # 行为分析
+
+            # 🔧 修复：使用默认时间窗口设置（与检测服务保持一致）
+            time_window_seconds = 0.5  # 默认时间窗口，与detection_service.py中的设置保持一致
+
+            # 行为分析（基于时间窗口去重后的结果）
             behavior_stats = {}
             for result in results:
                 behavior = result.behavior_type or 'unknown'
@@ -691,44 +764,46 @@ def create_app(config_name='development'):
                     behavior_stats[behavior] = {
                         'count': 0,
                         'confidence_sum': 0,
-                        'frames': []
+                        'timestamps': []
                     }
                 behavior_stats[behavior]['count'] += 1
                 behavior_stats[behavior]['confidence_sum'] += result.confidence
-                behavior_stats[behavior]['frames'].append(result.frame_number)
-            
+                behavior_stats[behavior]['timestamps'].append(result.timestamp)
+
             behaviors = []
             for behavior, stats in behavior_stats.items():
                 avg_confidence = stats['confidence_sum'] / stats['count'] if stats['count'] > 0 else 0
-                duration = (max(stats['frames']) - min(stats['frames'])) / 25.0 if stats['frames'] else 0
+                # 🔧 修复：计算实际持续时间而不是时间跨度
+                # 每次检测代表该行为在时间窗口内的持续，所以持续时间 = 检测次数 × 时间窗口
+                duration = stats['count'] * time_window_seconds
                 behaviors.append({
                     'behavior': behavior,
                     'count': stats['count'],
                     'confidence': f"{avg_confidence:.2f}",
                     'duration': f"{duration:.1f}s"
                 })
-            
+
             # 构建视频URL
             video_url = None
             if task.output_path and os.path.exists(task.output_path):
                 filename = os.path.basename(task.output_path)
                 video_url = f"http://localhost:5001/api/outputs/{filename}"
-            
-            # 返回完整结果
+
+            # 🔧 修复：返回正确的统计信息
             return jsonify({
                 'success': True,
                 'filename': task.task_name,
                 'videoUrl': video_url,
                 'downloadUrl': f"http://localhost:5001/api/download/result/{task_id}",
-                'totalFrames': task.total_frames or 0,
+                'totalFrames': task.total_frames or 0,  # 🔧 现在应该有正确的总帧数
                 'detectedFrames': detected_frames,
-                'totalDetections': total_detections,
-                'alertCount': alert_count,
-                'behaviors': behaviors,
+                'totalDetections': total_detections,  # 🔧 这是时间窗口去重后的有效行为数
+                'alertCount': alert_count,  # 🔧 这是时间窗口去重后的报警数
+                'behaviors': behaviors,  # 🔧 基于时间窗口去重后的行为分析
                 'task': task.to_dict(),
                 'results': [result.to_dict() for result in results[:50]]  # 限制返回数量
             })
-            
+
         except Exception as e:
             logger.error(f"获取任务结果失败: {str(e)}")
             return jsonify({'error': f'获取失败: {str(e)}'}), 500
@@ -877,6 +952,9 @@ def create_app(config_name='development'):
             total_alerts = AlertRecord.query.count()
             active_alerts = AlertRecord.query.filter_by(status='active').count()
             
+            # 检测结果统计
+            total_detections = DetectionResult.query.count()
+
             # 今日统计
             today_start, today_end = get_today_start_end_beijing()
             today_tasks = DetectionTask.query.filter(
@@ -885,7 +963,7 @@ def create_app(config_name='development'):
             today_alerts = AlertRecord.query.filter(
                 AlertRecord.created_at >= today_start
             ).count()
-            
+
             return jsonify({
                 'success': True,
                 'statistics': {
@@ -900,6 +978,9 @@ def create_app(config_name='development'):
                         'total': total_alerts,
                         'active': active_alerts,
                         'today': today_alerts
+                    },
+                    'detections': {
+                        'total': total_detections
                     }
                 }
             })
@@ -924,7 +1005,7 @@ def create_app(config_name='development'):
             
             # 总检测数（从检测结果表统计）
             total_detections = DetectionResult.query.count()
-            
+
             return jsonify({
                 'success': True,
                 'activeTasks': active_tasks,
@@ -945,8 +1026,8 @@ def create_app(config_name='development'):
             start_time = request.args.get('startTime')
             end_time = request.args.get('endTime')
             
-            # 设置时间范围
-            end_dt = get_beijing_now()
+            # 🔧 修复：设置时间范围，使用不带时区信息的北京时间（与数据库一致）
+            end_dt = get_beijing_datetime()  # 使用不带时区信息的北京时间
             if period == '24h':
                 start_dt = end_dt - timedelta(hours=24)
             elif period == '7d':
@@ -961,9 +1042,18 @@ def create_app(config_name='development'):
             # 如果有自定义时间范围
             if start_time and end_time:
                 try:
-                    start_dt = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
-                    end_dt = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
-                except ValueError:
+                    # 🔧 修复：解析前端发送的UTC时间并转换为北京时间（不带时区信息）
+                    start_utc = datetime.fromisoformat(start_time.replace('Z', '+00:00'))
+                    end_utc = datetime.fromisoformat(end_time.replace('Z', '+00:00'))
+
+                    # 转换为北京时间（UTC+8）并移除时区信息，与数据库格式一致
+                    from utils.time_utils import BEIJING_TZ
+                    start_dt = start_utc.astimezone(BEIJING_TZ).replace(tzinfo=None)
+                    end_dt = end_utc.astimezone(BEIJING_TZ).replace(tzinfo=None)
+
+                    logger.info(f"📊 自定义时间范围转换: UTC({start_time}, {end_time}) -> 北京时间({start_dt}, {end_dt})")
+                except ValueError as e:
+                    logger.warning(f"📊 时间范围解析失败: {e}")
                     pass
             
             # --- 行为分布数据 (全局统计) ---
@@ -973,13 +1063,17 @@ def create_app(config_name='development'):
             ).filter(
                 DetectionResult.behavior_type.isnot(None)
             ).group_by(DetectionResult.behavior_type).all()
-            
+
             behavior_data = []
             behavior_names = {
                 'fall down': '跌倒检测', 'fight': '打斗行为', 'enter': '区域闯入',
                 'exit': '区域离开', 'run': '快速奔跑', 'sit': '坐下行为',
                 'stand': '站立行为', 'walk': '正常行走'
             }
+
+            # 🔧 添加调试信息
+            logger.info(f"📊 图表数据查询 - 行为分布查询结果: {len(behavior_query)} 条记录")
+
             for behavior, count in behavior_query:
                 behavior_data.append({
                     'name': behavior_names.get(behavior, behavior),
@@ -988,6 +1082,8 @@ def create_app(config_name='development'):
                 })
             
             # --- 时间趋势数据 (基于任务创建时间) ---
+            logger.info(f"📊 图表数据查询 - 时间范围: {start_dt} 到 {end_dt}, 周期: {period}")
+
             if period == '24h':
                 # 24小时趋势，按小时分组
                 trend_query = db.session.query(
@@ -997,7 +1093,9 @@ def create_app(config_name='development'):
                     DetectionTask.created_at >= start_dt,
                     DetectionTask.created_at <= end_dt
                 ).group_by(db.func.strftime('%H', DetectionTask.created_at)).all()
-                
+
+                logger.info(f"📊 24小时趋势查询结果: {len(trend_query)} 条记录")
+
                 trend_data = []
                 hours_data = {item.hour: item.count for item in trend_query}
                 for hour in range(24):
@@ -1007,35 +1105,44 @@ def create_app(config_name='development'):
                         'value': hours_data.get(hour_str, 0)
                     })
             else:
-                # 多日趋势，按日分组
+                # 多日趋势，按日分组，同时统计检测数量和报警数量
                 trend_query = db.session.query(
                     db.func.strftime('%Y-%m-%d', DetectionTask.created_at).label('date'),
-                    db.func.count(DetectionResult.id).label('count')
+                    db.func.count(DetectionResult.id).label('detections'),
+                    db.func.count(
+                        db.case((DetectionResult.is_anomaly == True, 1), else_=None)
+                    ).label('alerts')
                 ).join(DetectionTask, DetectionResult.task_id == DetectionTask.id).filter(
                     DetectionTask.created_at >= start_dt,
                     DetectionTask.created_at <= end_dt
                 ).group_by(db.func.strftime('%Y-%m-%d', DetectionTask.created_at)).all()
-                
+
+                logger.info(f"📊 多日趋势查询结果: {len(trend_query)} 条记录")
+
                 trend_data = []
-                day_counts = {item.date: item.count for item in trend_query}
+                day_data = {item.date: {'detections': item.detections, 'alerts': item.alerts} for item in trend_query}
                 current_day = start_dt.date()
                 while current_day <= end_dt.date():
                     date_str = current_day.strftime('%Y-%m-%d')
+                    day_info = day_data.get(date_str, {'detections': 0, 'alerts': 0})
                     trend_data.append({
                         'time': date_str,
-                        'value': day_counts.get(date_str, 0)
+                        'detections': day_info['detections'],
+                        'alerts': day_info['alerts'],
+                        'value': day_info['detections']  # 保持向后兼容
                     })
                     current_day += timedelta(days=1)
             
             # --- 报警级别分布 (基于报警创建时间) ---
             alert_levels = [
                 {'name': '高级别报警', 'value': 0, 'level': 'high'},
-                {'name': '中级别报警', 'value': 0, 'level': 'medium'}, 
+                {'name': '中级别报警', 'value': 0, 'level': 'medium'},
                 {'name': '低级别报警', 'value': 0, 'level': 'low'}
             ]
             high_risk_behaviors = ['fall down', 'fight', 'enter']
             medium_risk_behaviors = ['run', 'exit']
-            
+
+            total_alerts = 0
             for alert in alert_levels:
                 query = AlertRecord.query.filter(
                     AlertRecord.created_at >= start_dt,
@@ -1047,6 +1154,9 @@ def create_app(config_name='development'):
                     alert['value'] = query.filter(AlertRecord.alert_type.in_(medium_risk_behaviors)).count()
                 else:
                     alert['value'] = query.filter(~AlertRecord.alert_type.in_(high_risk_behaviors + medium_risk_behaviors)).count()
+                total_alerts += alert['value']
+
+            logger.info(f"📊 报警级别分布查询结果: 总计 {total_alerts} 条报警")
             
             # --- 24小时时段分析 (基于任务创建时间) ---
             hourly_query = db.session.query(
@@ -1059,7 +1169,9 @@ def create_app(config_name='development'):
                 DetectionTask.created_at >= start_dt,
                 DetectionTask.created_at <= end_dt
             ).group_by(db.func.strftime('%H', DetectionTask.created_at)).all()
-            
+
+            logger.info(f"📊 24小时时段分析查询结果: {len(hourly_query)} 条记录")
+
             hourly_data = []
             hour_stats = {item.hour: {'detections': item.detections, 'alerts': item.alerts} for item in hourly_query}
             for hour in range(24):

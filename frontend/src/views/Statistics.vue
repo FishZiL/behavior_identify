@@ -321,20 +321,32 @@ export default {
           params.append('endTime', timeRange.value[1].toISOString())
         }
         params.append('period', currentPeriod.value)
-        
+
+        console.log('📊 Statistics: 开始获取统计数据，参数:', params.toString())
+
         // 获取基础统计数据
         const statsResponse = await apiRequest(`/api/statistics?${params}`)
+        console.log('📊 Statistics: 基础统计数据响应:', statsResponse)
         if (statsResponse.success) {
           // 更新概览统计
           const stats = statsResponse.statistics
-          overviewStats.totalDetections = stats.tasks?.total || 0
+          overviewStats.totalDetections = stats.detections?.total || 0  // 🔧 修复：使用检测结果总数
           overviewStats.totalAlerts = stats.alerts?.total || 0
           overviewStats.totalTasks = stats.tasks?.completed || 0
         }
-        
+
         // 获取图表数据
         const chartsResponse = await apiRequest(`/api/statistics/charts?${params}`)
+        console.log('📊 Statistics: 图表数据响应:', chartsResponse)
+
         if (chartsResponse.success && chartsResponse.charts) {
+          console.log('📊 Statistics: 图表数据详情:', {
+            behaviorDistribution: chartsResponse.charts.behaviorDistribution?.length || 0,
+            trendAnalysis: chartsResponse.charts.trendAnalysis?.length || 0,
+            alertLevels: chartsResponse.charts.alertLevels?.length || 0,
+            hourlyAnalysis: chartsResponse.charts.hourlyAnalysis?.length || 0
+          })
+
           // 处理行为统计数据
           const behaviorData = chartsResponse.charts.behaviorDistribution || []
           behaviorStats.value = behaviorData.map((item, index) => ({
@@ -346,29 +358,68 @@ export default {
             alertRate: Math.round(Math.random() * 20 + 5), // 模拟报警率
             trend: ['up', 'down', 'stable'][Math.floor(Math.random() * 3)]
           }))
-          
+
+          console.log('📊 Statistics: 处理后的行为统计数据:', behaviorStats.value)
+
           // 更新图表
           await nextTick()
+          console.log('📊 Statistics: 开始更新图表')
           updateCharts(chartsResponse.charts)
+          console.log('📊 Statistics: 图表更新完成')
+        } else {
+          console.warn('📊 Statistics: 图表数据响应无效或为空')
+          ElMessage.warning('图表数据为空，请检查是否有检测记录')
         }
       } catch (error) {
-        console.error('获取统计数据失败:', error)
-        ElMessage.error('获取统计数据失败')
+        console.error('📊 Statistics: 获取统计数据失败:', error)
+        ElMessage.error(`获取统计数据失败: ${error.message}`)
       }
     }
 
     // 更新图表
     const updateCharts = (data) => {
+      console.log('📊 Statistics: updateCharts 被调用，数据:', data)
+
+      if (!data) {
+        console.warn('📊 Statistics: updateCharts 收到空数据')
+        return
+      }
+
+      console.log('📊 Statistics: 开始更新各个图表')
       updateTrendChart(data.trendAnalysis || [])
       updateBehaviorChart(data.behaviorDistribution || [])
       updateAlertLevelChart(data.alertLevels || [])
       updateHourlyChart(data.hourlyAnalysis || [])
+      console.log('📊 Statistics: 所有图表更新完成')
     }
 
     // 更新趋势图
     const updateTrendChart = (data) => {
       if (!trendChartInstance) return
-      
+
+      console.log('📈 updateTrendChart 收到数据:', data)
+
+      // 🔧 修复：按日期显示趋势，而非按小时
+      const timeLabels = []
+      const detectionData = []
+      const alertData = []
+
+      if (data && data.length > 0) {
+        data.forEach(item => {
+          // 处理日期格式，如 "2025-07-05" -> "07-05"
+          const dateStr = item.time
+          const shortDate = dateStr.includes('-') ? dateStr.substring(5) : dateStr
+
+          timeLabels.push(shortDate)
+          detectionData.push(item.detections || item.value || 0)  // 🔧 优先使用detections字段
+          alertData.push(item.alerts || 0)  // 🔧 使用后端返回的真实报警数据
+        })
+      }
+
+      console.log('📈 处理后的时间标签:', timeLabels)
+      console.log('📈 处理后的检测数据:', detectionData)
+      console.log('📈 处理后的报警数据:', alertData)
+
       const option = {
         title: {
           text: '检测趋势分析',
@@ -392,7 +443,7 @@ export default {
         },
         xAxis: {
           type: 'category',
-          data: data.length > 0 ? data.map(item => item.time) : Array.from({length: 24}, (_, i) => `${i.toString().padStart(2, '0')}:00`)
+          data: timeLabels
         },
         yAxis: [
           {
@@ -420,7 +471,7 @@ export default {
               ])
             },
             lineStyle: { width: 3 },
-            data: data.length > 0 ? data.map(item => item.value) : Array(24).fill(0)
+            data: detectionData
           },
           {
             name: '报警数量',
@@ -428,12 +479,13 @@ export default {
             yAxisIndex: 1,
             smooth: true,
             lineStyle: { width: 3, color: '#ff4757' },
-            data: data.length > 0 ? data.map(item => Math.floor(item.value * 0.1)) : Array(24).fill(0)
+            data: alertData
           }
         ]
       }
-      
+
       trendChartInstance.setOption(option)
+      console.log('📈 趋势图更新完成')
     }
 
     // 更新行为分布图
@@ -498,7 +550,14 @@ export default {
     // 更新报警级别分布图
     const updateAlertLevelChart = (data) => {
       if (!alertLevelChartInstance) return
-      
+
+      console.log('⚠️ updateAlertLevelChart 收到数据:', data)
+
+      // 🔧 修复：过滤掉值为0的报警级别，避免显示空饼图
+      const validData = data && data.length > 0 ? data.filter(item => item.value > 0) : []
+
+      console.log('⚠️ 过滤后的有效数据:', validData)
+
       const option = {
         title: {
           text: '报警级别分布',
@@ -512,13 +571,26 @@ export default {
         series: [
           {
             type: 'pie',
-            radius: '70%',
-            center: ['50%', '60%'],
-            data: data.length > 0 ? data.map(item => ({
+            radius: ['40%', '70%'],  // 🔧 使用环形图，为标签留出空间
+            center: ['50%', '50%'],  // 🔧 居中显示
+            avoidLabelOverlap: true,  // 🔧 避免标签重叠
+            label: {
+              show: true,
+              position: 'outside',  // 🔧 标签显示在外侧
+              formatter: '{b}: {c}次\n({d}%)',  // 🔧 优化标签格式
+              fontSize: 12,
+              color: '#333'
+            },
+            labelLine: {
+              show: true,
+              length: 15,  // 🔧 引导线长度
+              length2: 10
+            },
+            data: validData.length > 0 ? validData.map(item => ({
               value: item.value,
               name: item.name,
               itemStyle: {
-                color: item.level === 'high' ? '#ff4757' : 
+                color: item.level === 'high' ? '#ff4757' :
                        item.level === 'medium' ? '#ffa502' : '#54a0ff'
               }
             })) : [{
@@ -536,14 +608,38 @@ export default {
           }
         ]
       }
-      
+
       alertLevelChartInstance.setOption(option)
+      console.log('⚠️ 报警级别图更新完成')
     }
 
     // 更新时段分析图
     const updateHourlyChart = (data) => {
       if (!hourlyChartInstance) return
-      
+
+      console.log('🕐 updateHourlyChart 收到数据:', data)
+
+      // 🔧 修复：将后端数据映射到完整的24小时数组
+      const detectionsData = Array(24).fill(0)
+      const alertsData = Array(24).fill(0)
+      const alertRateData = Array(24).fill(0)
+      const timeLabels = Array.from({length: 24}, (_, i) => `${i.toString().padStart(2, '0')}:00`)
+
+      if (data && data.length > 0) {
+        data.forEach(item => {
+          const hour = item.hour
+          if (hour >= 0 && hour < 24) {
+            detectionsData[hour] = item.detections || 0
+            alertsData[hour] = item.alerts || 0
+            alertRateData[hour] = item.alertRate || 0
+          }
+        })
+      }
+
+      console.log('🕐 处理后的检测数据:', detectionsData)
+      console.log('🕐 处理后的报警数据:', alertsData)
+      console.log('🕐 处理后的报警率数据:', alertRateData)
+
       const option = {
         title: {
           text: '24小时时段分析',
@@ -567,7 +663,7 @@ export default {
         },
         xAxis: {
           type: 'category',
-          data: Array.from({length: 24}, (_, i) => `${i.toString().padStart(2, '0')}:00`)
+          data: timeLabels
         },
         yAxis: [
           {
@@ -588,14 +684,14 @@ export default {
             type: 'bar',
             yAxisIndex: 0,
             itemStyle: { color: '#409eff' },
-            data: data.length > 0 ? data.map(item => item.detections) : Array(24).fill(0)
+            data: detectionsData
           },
           {
             name: '报警数量',
             type: 'bar',
             yAxisIndex: 0,
             itemStyle: { color: '#ff4757' },
-            data: data.length > 0 ? data.map(item => item.alerts) : Array(24).fill(0)
+            data: alertsData
           },
           {
             name: '报警率',
@@ -603,12 +699,13 @@ export default {
             yAxisIndex: 1,
             smooth: true,
             lineStyle: { width: 3, color: '#ffa502' },
-            data: data.length > 0 ? data.map(item => item.alertRate) : Array(24).fill(0)
+            data: alertRateData
           }
         ]
       }
-      
+
       hourlyChartInstance.setOption(option)
+      console.log('🕐 24小时时段图更新完成')
     }
 
     // 根据行为类型获取颜色

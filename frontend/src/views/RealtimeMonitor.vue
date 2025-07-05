@@ -130,7 +130,17 @@
         <!-- 实时检测结果 -->
         <el-card class="detection-card">
           <template #header>
-            <span>实时检测</span>
+            <div class="card-header">
+              <span>实时检测</span>
+              <el-button
+                size="small"
+                type="text"
+                @click="showDetectionDialog = true"
+                title="展开详细信息"
+              >
+                <el-icon><FullScreen /></el-icon>
+              </el-button>
+            </div>
           </template>
 
           <div class="detection-list">
@@ -178,7 +188,17 @@
           <template #header>
             <div class="card-header">
               <span>实时报警</span>
-              <el-badge :value="realtimeStats.total_alerts" :max="99" />
+              <div style="display: flex; align-items: center; gap: 8px;">
+                <el-badge :value="realtimeStats.total_alerts" :max="99" />
+                <el-button
+                  size="small"
+                  type="text"
+                  @click="showAlertDialog = true"
+                  title="展开详细信息"
+                >
+                  <el-icon><FullScreen /></el-icon>
+                </el-button>
+              </div>
             </div>
           </template>
 
@@ -300,6 +320,27 @@
             </div>
           </el-checkbox-group>
         </el-form-item>
+
+        <el-form-item label="统计时间窗口">
+          <div style="display: flex; align-items: center; gap: 10px;">
+            <el-slider
+              v-model="timeWindowSeconds"
+              :min="1"
+              :max="30"
+              :step="1"
+              show-stops
+              show-input
+              :input-size="'small'"
+              style="flex: 1;"
+            />
+            <span style="color: #666; font-size: 12px; white-space: nowrap;">
+              {{ timeWindowSeconds }}秒内去重统计
+            </span>
+          </div>
+          <div style="color: #999; font-size: 12px; margin-top: 5px;">
+            同一行为在设定时间内只统计一次，避免重复计数
+          </div>
+        </el-form-item>
       </el-form>
 
       <template #footer>
@@ -308,14 +349,152 @@
         <el-button type="primary" @click="saveSettings">保存</el-button>
       </template>
     </el-dialog>
+
+    <!-- 实时检测详情弹窗 -->
+    <el-dialog
+      v-model="showDetectionDialog"
+      title="实时检测详情"
+      width="800px"
+      :close-on-click-modal="false"
+    >
+      <div class="detection-detail-container">
+        <!-- 行为统计 -->
+        <div class="section">
+          <h4>行为统计 ({{ timeWindowSeconds }}秒去重)</h4>
+          <div class="behavior-stats-grid">
+            <div
+              v-for="behavior in realtimeStats.behavior_stats"
+              :key="behavior.behavior_type"
+              class="behavior-stat-card"
+            >
+              <div class="stat-header">
+                <span class="behavior-name">{{ behavior.behavior_name }}</span>
+                <el-tag type="primary" size="small">{{ behavior.count }}</el-tag>
+              </div>
+              <div class="stat-progress">
+                <el-progress
+                  :percentage="Math.min(100, (behavior.count / Math.max(1, Math.max(...realtimeStats.behavior_stats.map(b => b.count)))) * 100)"
+                  :show-text="false"
+                  :stroke-width="6"
+                />
+              </div>
+            </div>
+            <div v-if="realtimeStats.behavior_stats.length === 0" class="no-data">
+              <p>暂无统计数据</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <template #footer>
+        <el-button @click="showDetectionDialog = false">关闭</el-button>
+      </template>
+    </el-dialog>
+
+    <!-- 实时报警详情弹窗 -->
+    <el-dialog
+      v-model="showAlertDialog"
+      title="实时报警详情"
+      width="900px"
+      :close-on-click-modal="false"
+    >
+      <div class="alert-detail-container">
+        <!-- 报警统计概览 -->
+        <div class="section">
+          <h4>报警统计概览</h4>
+          <div class="alert-overview">
+            <div class="overview-item">
+              <div class="overview-number">{{ realtimeStats.total_alerts }}</div>
+              <div class="overview-label">总报警数</div>
+            </div>
+            <div class="overview-item">
+              <div class="overview-number">{{ realtimeStats.alert_behavior_stats.length }}</div>
+              <div class="overview-label">报警类型</div>
+            </div>
+            <div class="overview-item">
+              <div class="overview-number">{{ timeWindowSeconds }}s</div>
+              <div class="overview-label">去重窗口</div>
+            </div>
+          </div>
+        </div>
+
+        <!-- 报警行为统计 -->
+        <div class="section">
+          <h4>报警行为统计</h4>
+          <div class="alert-behavior-stats">
+            <div
+              v-for="behavior in realtimeStats.alert_behavior_stats"
+              :key="behavior.behavior_type"
+              class="alert-behavior-item"
+            >
+              <div class="behavior-info">
+                <el-icon color="#f56c6c"><Warning /></el-icon>
+                <span class="behavior-name">{{ behavior.behavior_name }}</span>
+              </div>
+              <div class="behavior-count">
+                <el-tag type="danger" size="small">{{ behavior.count }}</el-tag>
+              </div>
+            </div>
+            <div v-if="realtimeStats.alert_behavior_stats.length === 0" class="no-data">
+              <p>暂无报警统计</p>
+            </div>
+          </div>
+        </div>
+
+        <!-- 最近报警记录 -->
+        <div class="section">
+          <h4>最近报警记录</h4>
+          <div class="recent-alerts-table">
+            <el-table
+              :data="realtimeStats.recent_alerts"
+              style="width: 100%"
+              :max-height="300"
+            >
+              <el-table-column prop="time" label="时间" width="100" />
+              <el-table-column prop="behavior_name" label="行为" width="120" />
+              <el-table-column label="置信度" width="100">
+                <template #default="scope">
+                  <el-tag
+                    :type="scope.row.confidence > 0.8 ? 'success' : scope.row.confidence > 0.6 ? 'warning' : 'info'"
+                    size="small"
+                  >
+                    {{ (scope.row.confidence * 100).toFixed(1) }}%
+                  </el-tag>
+                </template>
+              </el-table-column>
+              <el-table-column prop="object_id" label="对象ID" width="80" />
+              <el-table-column label="位置" width="120">
+                <template #default="scope">
+                  <span>({{ scope.row.x || 0 }}, {{ scope.row.y || 0 }})</span>
+                </template>
+              </el-table-column>
+              <el-table-column label="状态" width="80">
+                <template #default="scope">
+                  <el-tag type="danger" size="small">报警</el-tag>
+                </template>
+              </el-table-column>
+            </el-table>
+            <div v-if="realtimeStats.recent_alerts.length === 0" class="no-data">
+              <el-icon size="48" color="#c0c4cc"><Warning /></el-icon>
+              <p>暂无报警记录</p>
+            </div>
+          </div>
+        </div>
+      </div>
+
+      <template #footer>
+        <el-button @click="showAlertDialog = false">关闭</el-button>
+        <el-button type="primary" @click="exportAlertData">导出数据</el-button>
+      </template>
+    </el-dialog>
   </div>
 </template>
 
 <script>
-import { ref, reactive, onUnmounted, watch } from 'vue'
+import { ref, reactive, onMounted, onUnmounted, watch } from 'vue'
 import { ElMessage } from 'element-plus'
 import {
-  VideoCamera, VideoPause, Setting, Warning, User, Search, Check
+  VideoCamera, VideoPause, Setting, Warning, User, Search, Check, FullScreen
 } from '@element-plus/icons-vue'
 import io from 'socket.io-client'
 import {
@@ -327,12 +506,14 @@ import {
 export default {
   name: 'RealtimeMonitor',
   components: {
-    VideoCamera, VideoPause, Setting, Warning, User, Search, Check
+    VideoCamera, VideoPause, Setting, Warning, User, Search, Check, FullScreen
   },
   setup() {
     const videoCanvas = ref(null)
     const isMonitoring = ref(false)
     const showSettings = ref(false)
+    const showDetectionDialog = ref(false)
+    const showAlertDialog = ref(false)
     const currentFPS = ref(0)
     const processingTime = ref(0)
     const currentDetections = ref([])
@@ -355,6 +536,9 @@ export default {
     
     // 🔧 使用统一配置管理
     const settings = reactive(configManager.getConfig('realtime'))
+
+    // 🔧 时间窗口配置
+    const timeWindowSeconds = ref(5)  // 默认5秒
 
     // 调试信息
     console.log('📺 [实时监控] 页面初始配置:', settings)
@@ -443,15 +627,24 @@ export default {
         // 设置停止状态标志，用于忽略主动断开连接的错误
         isStopping.value = true
 
-        // 🔧 关键修复：先断开视频流连接，再调用停止API
-        // 1. 立即断开视频流连接，模拟页面关闭的效果
-        console.log('🛑 前端：断开视频流连接')
+        // 🔧 优化用户体验：立即更新前端状态，避免卡顿感
+        console.log('🛑 前端：立即更新前端状态')
+        isMonitoring.value = false
         videoStreamUrl.value = ''  // 清空视频流URL，断开img标签的连接
+        currentDetections.value = []
+        ElMessage.success('监控已停止')
 
-        // 2. 等待一小段时间，确保连接断开
+        // 清理WebSocket连接
+        if (websocket) {
+          websocket.close()
+          websocket = null
+        }
+
+        // 🔧 异步调用后端API，不阻塞前端响应
+        // 等待一小段时间，确保连接断开
         await new Promise(resolve => setTimeout(resolve, 100))
 
-        // 3. 调用后端停止监控API
+        // 调用后端停止监控API
         console.log('🛑 前端：调用停止监控API')
         const response = await fetch('/api/stop_monitoring', {
           method: 'POST',
@@ -467,41 +660,19 @@ export default {
         const result = await response.json()
         console.log('🛑 前端：收到API响应', result)
 
-        if (result.success) {
-          // 更新前端状态
-          isMonitoring.value = false
-          currentDetections.value = []
-          ElMessage.success('监控已停止')
-
-          // 清理WebSocket连接
-          if (websocket) {
-            websocket.close()
-            websocket = null
-          }
-
-          // 清理定时器
-          if (durationTimer) {
-            clearInterval(durationTimer)
-            durationTimer = null
-          }
-
-          console.log('🛑 前端：停止监控完成')
-        } else {
-          throw new Error(result.error || '停止监控失败')
+        // 清理定时器
+        if (durationTimer) {
+          clearInterval(durationTimer)
+          durationTimer = null
         }
+
+        console.log('🛑 前端：停止监控完成')
       } catch (error) {
         console.error('🛑 前端：停止监控失败:', error)
-        ElMessage.error(`停止监控失败: ${error.message}`)
+        // 后端API调用失败，但前端状态已经更新，只显示警告
+        ElMessage.warning(`后端停止监控失败: ${error.message}，但前端已停止`)
 
-        // 即使后端调用失败，也要清理前端状态
-        isMonitoring.value = false
-        currentDetections.value = []
-        videoStreamUrl.value = ''
-
-        if (websocket) {
-          websocket.close()
-          websocket = null
-        }
+        // 确保定时器被清理
         if (durationTimer) {
           clearInterval(durationTimer)
           durationTimer = null
@@ -612,6 +783,7 @@ export default {
       total_alerts: 0,
       avg_fps: 0,
       behavior_stats: [],
+      alert_behavior_stats: [],  // 🔧 新增：报警行为统计
       recent_alerts: []
     })
 
@@ -686,6 +858,7 @@ export default {
         total_alerts: statistics.total_alerts || 0,
         avg_fps: statistics.avg_fps || 0,
         behavior_stats: statistics.behavior_stats || [],
+        alert_behavior_stats: statistics.alert_behavior_stats || [],  // 🔧 新增：报警行为统计
         recent_alerts: statistics.recent_alerts || []
       })
 
@@ -769,7 +942,7 @@ export default {
     const handleCanvasClick = () => {
     }
 
-    const saveSettings = () => {
+    const saveSettings = async () => {
       // 验证配置
       const validation = configManager.validateConfig(settings)
       if (!validation.isValid) {
@@ -779,6 +952,10 @@ export default {
 
       // 保存配置
       configManager.saveConfig(settings, 'realtime')
+
+      // 🔧 同时保存时间窗口配置
+      await saveTimeWindow()
+
       ElMessage.success('设置已保存')
       showSettings.value = false
     }
@@ -793,7 +970,46 @@ export default {
       // 重置为默认配置
       configManager.resetConfig()
       Object.assign(settings, configManager.getConfig('realtime'))
+      timeWindowSeconds.value = 5  // 重置时间窗口
       ElMessage.success('配置已重置为默认值')
+    }
+
+    // 🔧 时间窗口相关方法
+    const loadTimeWindow = async () => {
+      try {
+        const response = await fetch('/api/statistics/time_window')
+        if (response.ok) {
+          const data = await response.json()
+          if (data.success) {
+            timeWindowSeconds.value = data.time_window_seconds
+          }
+        }
+      } catch (error) {
+        console.error('获取时间窗口配置失败:', error)
+      }
+    }
+
+    const saveTimeWindow = async () => {
+      try {
+        const response = await fetch('/api/statistics/time_window', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json'
+          },
+          body: JSON.stringify({
+            time_window_seconds: timeWindowSeconds.value
+          })
+        })
+
+        if (response.ok) {
+          const data = await response.json()
+          if (data.success) {
+            console.log('时间窗口设置成功:', data.message)
+          }
+        }
+      } catch (error) {
+        console.error('设置时间窗口失败:', error)
+      }
     }
 
     const formatTime = (timestamp) => {
@@ -813,6 +1029,43 @@ export default {
       ElMessage.error('视频流连接失败，请检查网络连接或切换到Canvas模式')
     }
 
+    // 🔧 导出报警数据
+    const exportAlertData = () => {
+      try {
+        const exportData = {
+          export_time: new Date().toISOString(),
+          time_window_seconds: timeWindowSeconds.value,
+          statistics: {
+            total_alerts: realtimeStats.total_alerts,
+            alert_behavior_stats: realtimeStats.alert_behavior_stats,
+            recent_alerts: realtimeStats.recent_alerts
+          },
+          current_detections: currentDetections.value,
+          monitoring_duration: monitoringDuration.value
+        }
+
+        const dataStr = JSON.stringify(exportData, null, 2)
+        const dataBlob = new Blob([dataStr], { type: 'application/json' })
+
+        const link = document.createElement('a')
+        link.href = URL.createObjectURL(dataBlob)
+        link.download = `realtime_alerts_${new Date().toISOString().slice(0, 19).replace(/:/g, '-')}.json`
+        document.body.appendChild(link)
+        link.click()
+        document.body.removeChild(link)
+
+        ElMessage.success('报警数据已导出')
+      } catch (error) {
+        console.error('导出数据失败:', error)
+        ElMessage.error('导出数据失败')
+      }
+    }
+
+    // 🔧 组件挂载时加载时间窗口配置
+    onMounted(() => {
+      loadTimeWindow()
+    })
+
     onUnmounted(() => {
       if (websocket) {
         websocket.close()
@@ -826,6 +1079,8 @@ export default {
       videoCanvas,
       isMonitoring,
       showSettings,
+      showDetectionDialog,
+      showAlertDialog,
       currentFPS,
       processingTime,
       currentDetections,
@@ -837,6 +1092,8 @@ export default {
       videoStreamUrl,
       isStopping,
       realtimeStats, // 🔧 新增：实时统计数据
+      // 🔧 时间窗口配置
+      timeWindowSeconds,
       // 配置选项
       availableBehaviors,
       deviceOptions,
@@ -848,6 +1105,9 @@ export default {
       saveSettings,
       cancelSettings,
       resetSettings,
+      loadTimeWindow,
+      saveTimeWindow,
+      exportAlertData,
       formatTime
     }
   }
@@ -1143,5 +1403,144 @@ export default {
     margin: 4px;
     justify-content: flex-start;
   }
+}
+
+/* 🔧 弹窗样式 */
+.detection-detail-container,
+.alert-detail-container {
+  max-height: 70vh;
+  overflow-y: auto;
+}
+
+.section {
+  margin-bottom: 24px;
+}
+
+.section h4 {
+  margin: 0 0 16px 0;
+  color: #303133;
+  font-size: 16px;
+  font-weight: 600;
+  border-bottom: 2px solid #e4e7ed;
+  padding-bottom: 8px;
+}
+
+.detection-detail-list {
+  max-height: 300px;
+  overflow-y: auto;
+}
+
+.detection-detail-item {
+  padding: 12px;
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  margin-bottom: 8px;
+  background: #fafafa;
+}
+
+.detection-detail-item.alert {
+  border-color: #f56c6c;
+  background: #fef0f0;
+}
+
+.detection-header {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  margin-bottom: 8px;
+}
+
+.behavior-name {
+  font-weight: 600;
+  color: #303133;
+}
+
+.detection-meta {
+  display: flex;
+  gap: 16px;
+  font-size: 12px;
+  color: #909399;
+}
+
+.behavior-stats-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fill, minmax(200px, 1fr));
+  gap: 12px;
+}
+
+.behavior-stat-card {
+  padding: 12px;
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  background: #fff;
+}
+
+.stat-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 8px;
+}
+
+.alert-overview {
+  display: flex;
+  gap: 24px;
+  margin-bottom: 16px;
+}
+
+.overview-item {
+  text-align: center;
+  padding: 16px;
+  border: 1px solid #e4e7ed;
+  border-radius: 8px;
+  background: #fafafa;
+  flex: 1;
+}
+
+.overview-number {
+  font-size: 24px;
+  font-weight: bold;
+  color: #409eff;
+  margin-bottom: 4px;
+}
+
+.overview-label {
+  font-size: 12px;
+  color: #909399;
+}
+
+.alert-behavior-stats {
+  max-height: 200px;
+  overflow-y: auto;
+}
+
+.alert-behavior-item {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.behavior-info {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+}
+
+.recent-alerts-table {
+  max-height: 400px;
+  overflow-y: auto;
+}
+
+.no-data {
+  text-align: center;
+  padding: 40px 20px;
+  color: #909399;
+}
+
+.no-data p {
+  margin: 8px 0 0 0;
+  font-size: 14px;
 }
 </style>

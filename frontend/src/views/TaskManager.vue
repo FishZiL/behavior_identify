@@ -466,23 +466,30 @@ export default {
         }
         
         const data = await getTasks(params)
+        console.log('📊 TaskManager: 后端返回的原始数据:', data)
+
         // 映射后端数据格式到前端期望格式
-        tasks.value = (data.tasks || []).map(task => ({
-          id: task.id,
-          name: task.filename,
-          type: task.source_type || 'video',
-          status: task.status,
-          progress: task.progress,
-          detections: task.detections,
-          alerts: 0, // 暂时设为0，后续可从单独API获取
-          createTime: task.uploadTime,
-          size: task.size
-        }))
+        tasks.value = (data.tasks || []).map(task => {
+          console.log(`📊 TaskManager: 任务 ${task.id} 的报警数量: ${task.alerts}`)
+          return {
+            id: task.id,
+            name: task.filename,
+            type: task.source_type || 'video',
+            status: task.status,
+            progress: task.progress,
+            detections: task.detections,
+            alerts: task.alerts || 0, // 🔧 使用后端返回的报警数量
+            createTime: task.uploadTime,
+            size: task.size
+          }
+        })
         totalTasks.value = data.total || 0
-        
+
+        console.log('📊 TaskManager: 处理后的任务数据:', tasks.value.map(t => ({ id: t.id, name: t.name, alerts: t.alerts })))
+
         // 更新统计数据
         updateStats()
-        
+
         console.log('✓ 任务列表获取成功:', data)
       } catch (error) {
         console.error('获取任务列表失败:', error)
