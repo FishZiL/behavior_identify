@@ -9,10 +9,40 @@ YELLOW='\033[1;33m'
 BLUE='\033[0;34m'
 NC='\033[0m'
 
+# 检测当前部署配置
+detect_config() {
+    USE_GPU=false
+    USE_NGINX=false
+    COMPOSE_PROFILES="default"
+
+    # 检查是否有GPU容器运行
+    if docker ps --format "table {{.Names}}" | grep -q "behavior-backend" && \
+       docker inspect behavior-backend 2>/dev/null | grep -q "nvidia"; then
+        USE_GPU=true
+        COMPOSE_PROFILES="gpu"
+    fi
+
+    # 检查是否有Nginx容器运行
+    if docker ps --format "table {{.Names}}" | grep -q "behavior-nginx"; then
+        USE_NGINX=true
+        if [ "$USE_GPU" = true ]; then
+            COMPOSE_PROFILES="gpu-nginx"
+        else
+            COMPOSE_PROFILES="nginx"
+        fi
+    fi
+}
+
 # 显示帮助信息
 show_help() {
+    detect_config
     echo "智能行为检测系统 - 管理脚本"
     echo "用法: ./manage.sh [命令]"
+    echo ""
+    echo -e "${BLUE}当前配置:${NC}"
+    echo "  GPU加速: $USE_GPU"
+    echo "  Nginx代理: $USE_NGINX"
+    echo "  配置档案: $COMPOSE_PROFILES"
     echo ""
     echo "可用命令:"
     echo "  start     - 启动所有服务"
@@ -25,27 +55,37 @@ show_help() {
     echo "  restore   - 恢复数据"
     echo "  update    - 更新服务"
     echo "  health    - 健康检查"
+    echo "  gpu       - 显示GPU信息"
     echo ""
 }
 
 # 启动服务
 start_services() {
+    detect_config
     echo -e "${YELLOW}🚀 启动服务...${NC}"
-    docker-compose up -d
+
+    docker-compose --profile $COMPOSE_PROFILES up -d
+
     echo -e "${GREEN}✅ 服务启动完成${NC}"
 }
 
 # 停止服务
 stop_services() {
+    detect_config
     echo -e "${YELLOW}⏹️  停止服务...${NC}"
-    docker-compose down
+
+    docker-compose --profile $COMPOSE_PROFILES down
+
     echo -e "${GREEN}✅ 服务停止完成${NC}"
 }
 
 # 重启服务
 restart_services() {
+    detect_config
     echo -e "${YELLOW}🔄 重启服务...${NC}"
-    docker-compose restart
+
+    docker-compose --profile $COMPOSE_PROFILES restart
+
     echo -e "${GREEN}✅ 服务重启完成${NC}"
 }
 
@@ -226,10 +266,43 @@ main() {
         health)
             health_check
             ;;
+        gpu)
+            show_gpu_info
+            ;;
         *)
             show_help
             ;;
     esac
+}
+
+# 显示GPU信息
+show_gpu_info() {
+    echo -e "${BLUE}🎮 GPU信息${NC}"
+    echo "=========================="
+
+    if command -v nvidia-smi &> /dev/null; then
+        echo -e "${GREEN}✅ NVIDIA驱动已安装${NC}"
+        echo ""
+        nvidia-smi
+        echo ""
+
+        # 检查Docker GPU支持
+        if docker info | grep -i nvidia &> /dev/null; then
+            echo -e "${GREEN}✅ Docker支持GPU${NC}"
+        else
+            echo -e "${RED}❌ Docker不支持GPU${NC}"
+        fi
+
+        # 检查GPU容器
+        if docker ps --format "table {{.Names}}" | grep -q "behavior-backend" && \
+           docker inspect behavior-backend 2>/dev/null | grep -q "nvidia"; then
+            echo -e "${GREEN}✅ 当前部署使用GPU加速${NC}"
+        else
+            echo -e "${YELLOW}⚠️  当前部署未使用GPU加速${NC}"
+        fi
+    else
+        echo -e "${RED}❌ NVIDIA驱动未安装${NC}"
+    fi
 }
 
 # 执行主函数
